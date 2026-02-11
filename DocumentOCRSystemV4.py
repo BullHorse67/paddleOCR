@@ -18,6 +18,7 @@ from OCRModelFactory import OCRModelFactory, EngineType
 并发版
 """
 
+
 class DocumentOCRSystemV4:
     def __init__(self, output_dir: str):
         self.output_dir = output_dir
@@ -35,6 +36,122 @@ class DocumentOCRSystemV4:
             'formula_number': EngineType.TEXT
         }
 
+    @staticmethod
+    def _split_page_chunks(total_pages: int, process_count: int) -> List[List[int]]:
+        """按进程数平均切分页索引，保证页码连续且覆盖完整。"""
+        if total_pages <= 0:
+            return []
+        process_count = max(1, min(process_count, total_pages))
+
+        base = total_pages // process_count
+        remain = total_pages % process_count
+
+        chunks = []
+        start = 0
+        for i in range(process_count):
+            size = base + (1 if i < remain else 0)
+            end = start + size
+            chunks.append(list(range(start, end)))
+            start = end
+        return [chunk for chunk in chunks if chunk]
+
+    def _process_page_chunk(self, pdf_path: str, page_indices: List[int], run_folder: str, extension: str):
+        """每个子进程处理一个页块，单页异常跳过。"""
+        infos = []
+        doc = fitz.open(pdf_path)
+        total_pages = len(doc)
+
+        try:
+            for page_idx in page_indices:
+                start_time = time.time()
+                page_no = page_idx + 1
+                page_folder = os.path.join(run_folder, f"page_{page_no}")
+                os.makedirs(page_folder, exist_ok=True)
+
+                try:
+                    print(f"[*] 正在处理第 {page_no}/{total_pages} 页...")
+
+                    # 1. 渲染 PDF 页为图片 (300 DPI)
+                    img = self._render_page(doc, page_idx)
+
+                    # 2. 版面区域识别 (确定需要哪些模型)
+                    layout_engine = OCRModelFactory.get_engine([EngineType.LAYOUT])
+                    layout_res = layout_engine.predict(img, layout_nms=True)
+                    detected_types = self._get_engine_types(layout_res)
+
+                    if not detected_types:
+                        print(f"第 {page_no}/{total_pages} 页未检测到内容，跳过")
+                        infos.append({
+                            'page': page_no,
+                            'status': 'skipped',
+                            'execution_time': time.time() - start_time,
+                            'detected_types': [],
+                            'engine_type': 'N/A'
+                        })
+                        continue
+
+                    generated_images = []
+                    print(detected_types)
+                    if len(detected_types) == 1:
+                        print("只检测到一个区域类型，无需拆分。")
+                        generated_images.append({
+                            'image': img,
+                            'engine_type': list(detected_types)  # OCRLightModelFactory 接收 list
+                        })
+                    else:
+                        print("检测到多个区域类型，需要拆分区域。")
+                        merged_regions = self._split_regions(layout_res)
+                        generated_images = self.visualize_regions(img, merged_regions, page_folder)
+
+                    engines_used = []
+                    for item_idx, item in enumerate(generated_images):
+                        engine = item.get("engine_type")
+                        image = item.get("image")
+                        active_engine = OCRLightModelFactory.get_engine(engine)
+                        raw_output = active_engine.predict(image)
+
+                        for res_idx, r in enumerate(raw_output):
+                            # 避免多进程/多路由下覆盖同名文件
+                            engine_name = "_".join([et.value for et in engine]) if isinstance(engine, list) else str(engine)
+                            file_name = f"{page_no}_{engine_name}_{item_idx}_{res_idx}{extension}"
+                            save_path = os.path.join(page_folder, file_name)
+                            data = r._to_json()
+                            converted_data = convert_to_serializable(data)
+                            with open(save_path, 'w', encoding='utf-8') as f:
+                                json.dump(converted_data, f, ensure_ascii=False, indent=4)
+
+                            r.save_to_json(save_path=page_folder)
+
+                        engines_used.append((engine, active_engine))
+
+                    execution_time = time.time() - start_time
+                    print("Execution time for page {}: {} seconds".format(page_no, execution_time))
+
+                    info = {
+                        'page': page_no,
+                        'status': 'ok',
+                        'execution_time': execution_time,
+                        'detected_types': [eg.value for eg in detected_types],
+                        'engine_type': type(engines_used[0][1]).__name__ if engines_used else 'N/A'
+                    }
+                    infos.append(info)
+
+                except Exception as page_error:
+                    execution_time = time.time() - start_time
+                    print(f"[WARN] 第 {page_no}/{total_pages} 页处理异常，已跳过: {page_error}")
+                    infos.append({
+                        'page': page_no,
+                        'status': 'error',
+                        'execution_time': execution_time,
+                        'detected_types': [],
+                        'engine_type': 'N/A',
+                        'error': str(page_error)
+                    })
+        finally:
+            doc.close()
+
+        return infos
+
     def process_document(self, pdf_path: str, output_file: str = "final_result.txt"):
         """主执行流程：PDF拆分 -> 版面分析 -> 路由识别 -> 归一化排序 -> 写入"""
         all_content = []
@@ -42,130 +159,59 @@ class DocumentOCRSystemV4:
         base_path = r"C:\Users\HUAWEI\Desktop\dyysai\lightModel\test7"
         extension = ".txt"
 
-        # 记录总处理时间的开始时间
         total_start_time = time.time()
-
-        # 用于记录每一页的处理信息
         processing_info = []
 
-        # Create a new folder A for this run
-        run_folder = os.path.join(base_path, f"run_{int(time.time())}")  # Unique folder for this run
+        run_folder = os.path.join(base_path, f"run_{int(time.time())}")
         os.makedirs(run_folder, exist_ok=True)
 
-        # Define a function to process a single page (for multiprocessing)
-        def process_single_page(page_idx):
-            start_time = time.time()
-            page_folder = os.path.join(run_folder, f"page_{page_idx + 1}")
-            os.makedirs(page_folder, exist_ok=True)
-            print(f"[*] 正在处理第 {page_idx + 1}/{len(doc)} 页...")
+        total_pages = len(doc)
+        doc.close()
 
-            # 1. 渲染 PDF 页为图片 (300 DPI)
-            img = self._render_page(doc, page_idx)
+        # 仅使用多进程并发：按进程数平均拆分 page_idx 给各子进程
+        num_processes = min(multiprocessing.cpu_count(), total_pages) if total_pages > 0 else 1
+        page_chunks = self._split_page_chunks(total_pages, num_processes)
 
-            # 2. 版面区域识别 (确定需要哪些模型)
-            layout_engine = OCRModelFactory.get_engine([EngineType.LAYOUT])
-            layout_res = layout_engine.predict(img, layout_nms=True)
-            detected_types = self._get_engine_types(layout_res)
-
-            if not detected_types:
-                print(f"第 {page_idx + 1}/{len(doc)} 页未检测到内容，跳过")
-                return None  # Return None if skipped
-
-            generated_images = []
-            print(detected_types)
-            if len(detected_types) == 1:
-                print("只检测到一个区域类型，无需拆分。")
-                generated_images.append({
-                    'image': img,
-                    'engine_type': list(detected_types)  # 保存区域类型
-                })
-            else:
-                print("检测到多个区域类型，需要拆分区域。")
-                merged_regions = self._split_regions(layout_res)  # 使用已有的 _split_regions 方法进行拆分
-                # 假设已经完成区域合并（调用了_split_regions）
-                generated_images = self.visualize_regions(img, merged_regions, page_folder)
-
-            # Create a fixed thread pool for this page's predictions (reuse threads within page)
-            with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=4) as thread_executor:  # Adjust max_workers as needed, e.g., based on CPU/GPU
-                # Define a function for threaded prediction
-                def predict_item(item):
-                    engine = item.get("engine_type")
-                    image = item.get("image")
-                    active_engine = OCRLightModelFactory.get_engine(engine)  # 统一调用 predict
-                    raw_output = active_engine.predict(image)
-                    for r in raw_output:
-                        # Save the results for the current page in its specific folder
-                        file_name = f"{page_idx}{extension}"
-                        save_path = os.path.join(page_folder, file_name)
-                        data = r._to_json()  # Convert to serializable data
-                        converted_data = convert_to_serializable(data)
-                        with open(save_path, 'w', encoding='utf-8') as f:
-                            json.dump(converted_data, f, ensure_ascii=False, indent=4)
-                        # Save processing information in the run folder
-                        r.save_to_json(save_path=page_folder)
-                    return engine, active_engine  # Return for info
-
-                # Submit predictions to thread pool
-                future_to_item = {thread_executor.submit(predict_item, item): item for item in generated_images}
-                engines_used = []
-                for future in concurrent.futures.as_completed(future_to_item):
-                    engine, active_engine = future.result()
-                    engines_used.append((engine, active_engine))
-
-            # 4. 结果归一化 (核心修改：处理 PaddleOCR JSON 和 PPStructure Dict)
-            # normalized_items = self._normalize_results(raw_output, active_engine)  # Commented in original
-
-            end_time = time.time()
-            execution_time = end_time - start_time
-            print("Execution time for page {}: {} seconds".format(page_idx + 1, execution_time))
-
-            # 记录处理信息
-            info = {
-                'page': page_idx + 1,
-                'execution_time': execution_time,
-                'detected_types': [eg.value for eg in detected_types],  # Adjusted to use detected_types
-                'engine_type': type(engines_used[0][1]).__name__ if engines_used else 'N/A'  # Use first if multiple
+        with concurrent.futures.ProcessPoolExecutor(max_workers=len(page_chunks) if page_chunks else 1) as process_executor:
+            future_to_chunk = {
+                process_executor.submit(self._process_page_chunk, pdf_path, chunk, run_folder, extension): chunk
+                for chunk in page_chunks
             }
-            return info
 
-        # Use ProcessPoolExecutor for parallel page processing
-        num_processes = multiprocessing.cpu_count()  # Or set to a fixed number, e.g., 4
-        with concurrent.futures.ProcessPoolExecutor(max_workers=num_processes) as process_executor:
-            # Submit all pages to the process pool
-            future_to_page = {process_executor.submit(process_single_page, page_idx): page_idx for page_idx in
-                              range(len(doc))}
+            for future in concurrent.futures.as_completed(future_to_chunk):
+                try:
+                    chunk_infos = future.result()
+                    processing_info.extend(chunk_infos)
+                except Exception as chunk_error:
+                    # 页块级异常：跳过，不影响其他页块
+                    print(f"[ERROR] 页块任务异常，已跳过该块: {chunk_error}")
 
-            # Collect results as they complete
-            for future in concurrent.futures.as_completed(future_to_page):
-                info = future.result()
-                if info:
-                    processing_info.append(info)
+        processing_info.sort(key=lambda x: x['page'])
 
         # TODO 将得到的数据按照y坐标进行排序组装
 
-        # 计算总处理时间
         total_end_time = time.time()
         total_execution_time = total_end_time - total_start_time
 
-        # 写入处理信息到txt文件 (save in folder A)
         info_file_path = os.path.join(run_folder, "processing_info.txt")
         with open(info_file_path, "w", encoding="utf-8") as f:
             f.write("# OCR 处理信息\n\n")
             f.write(f"源文件: {os.path.basename(pdf_path)}\n")
-            f.write(f"总页数: {len(doc)}\n")
+            f.write(f"总页数: {total_pages}\n")
             f.write(f"处理时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"总执行时间: {total_execution_time:.4f} 秒\n\n")
             f.write("---\n\n")
 
             for info in processing_info:
                 f.write(f"## 第 {info['page']} 页\n")
+                f.write(f"状态: {info.get('status', 'ok')}\n")
                 f.write(f"执行时间: {info['execution_time']:.4f} 秒\n")
                 f.write(f"检测到的类型: {', '.join(info['detected_types'])}\n")
-                f.write(f"使用的引擎类型: {info['engine_type']}\n\n")
+                f.write(f"使用的引擎类型: {info['engine_type']}\n")
+                if info.get('error'):
+                    f.write(f"错误信息: {info['error']}\n")
+                f.write("\n")
 
-        doc.close()
-        # print(f"[DONE] 结果已保存至: {final_path}")
         print(f"[DONE] 处理信息已保存至: {info_file_path}")
         print(f"[DONE] 总执行时间: {total_execution_time:.4f} 秒")
 
