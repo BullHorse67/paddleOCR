@@ -159,7 +159,6 @@ class DocumentOCRSystemV4:
         base_path = r"C:\Users\HUAWEI\Desktop\dyysai\lightModel\test7"
         extension = ".txt"
 
-        # 记录总处理时间的开始时间
         total_start_time = time.time()
         # 用于记录每一页的处理信息
         processing_info = []
