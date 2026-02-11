@@ -14,9 +14,8 @@ from OCRLightModelFactory import OCRLightModelFactory
 from OCRModelFactory import OCRModelFactory, EngineType
 
 """
-并发版
+多进程并发版本
 """
-
 
 class DocumentOCRSystemV4:
     def __init__(self, output_dir: str):
@@ -61,6 +60,7 @@ class DocumentOCRSystemV4:
         total_pages = len(doc)
 
         try:
+            # TODO 是否限制识别时间，防止时间过长
             for page_idx in page_indices:
                 start_time = time.time()
                 page_no = page_idx + 1
@@ -116,7 +116,7 @@ class DocumentOCRSystemV4:
                         page_normalized_items.extend(normalized_items)
 
                         # 不再单独保存每个识别对象的 json，统一汇总输出到一个 txt
-                        _ = item_idx
+                        # _ = item_idx
 
                         engines_used.append((engine, active_engine))
 
@@ -127,7 +127,7 @@ class DocumentOCRSystemV4:
 
                     info = {
                         'page': page_no,
-                        'status': 'ok',
+                        'status': 'success',
                         'execution_time': execution_time,
                         'detected_types': [eg.value for eg in detected_types],
                         'engine_type': type(engines_used[0][1]).__name__ if engines_used else 'N/A',
@@ -170,7 +170,7 @@ class DocumentOCRSystemV4:
         doc.close()
 
         # 仅使用多进程并发：按进程数平均拆分 page_idx 给各子进程
-        num_processes = min(multiprocessing.cpu_count(), total_pages) if total_pages > 0 else 1
+        num_processes = min(1, total_pages) if total_pages > 0 else 1
         page_chunks = self._split_page_chunks(total_pages, num_processes)
 
         with concurrent.futures.ProcessPoolExecutor(max_workers=len(page_chunks) if page_chunks else 1) as process_executor:
@@ -264,8 +264,10 @@ class DocumentOCRSystemV4:
                 res_list = block['parsing_res_list']
 
                 for res in res_list:
-                    bbox = res.block_bbox
-                    content = res.block_content
+                    # bbox = res.block_bbox
+                    bbox = res.bbox
+                    # content = res.block_content
+                    content = res.content
 
                     if content is None:
                         continue
@@ -296,9 +298,6 @@ class DocumentOCRSystemV4:
         """
         前提条件：存在多种EngineType，等同于有多个region
         拆分区域：根据版面识别结果，处理重叠区域并合并区域
-        """
-
-        """
         拆分区域步骤如下：
         1.首先根据layout_res的元素中的boxes的y1坐标从小到大进行排序，相当于从上到下；另外将其中的label转换为label_map对应的EngineType
         2.对排序后的layout_res进行遍历，每一个元素我们称之为区域
@@ -365,7 +364,8 @@ class DocumentOCRSystemV4:
                                 merged_regions.append(current_region)  # 添加当前区域
                                 current_region = region  # 开始新区域
                                 continue
-                else:  # 不存在重叠
+                # 3.2 不存在重叠
+                else:
                     if current_type == prev_type:  # 合并同类型区域
                         current_region['coordinate'][3] = max(prev_y2, current_y2)
                     else:
@@ -373,7 +373,6 @@ class DocumentOCRSystemV4:
                         current_region = region  # 进入新区域
                         region['coordinate'][1] = min(prev_y2, current_y1)  # 将两个区域的空白处合并给当前区域
             else:
-                # region['coordinate'][1] = 0  # 第一个区域的 y1 设为 0
                 current_region = region
 
         # 4. 特殊规则：头顶与脚注的处理
@@ -444,22 +443,8 @@ class DocumentOCRSystemV4:
             return self._split_regions(layout_res)  # 使用已有的 _split_regions 方法进行拆分
 
 
-def convert_to_serializable(obj):
-    if isinstance(obj, np.integer):
-        return int(obj)
-    if isinstance(obj, np.floating):
-        return float(obj)
-    if isinstance(obj, np.ndarray):
-        return obj.tolist()
-    if isinstance(obj, dict):
-        return {k: convert_to_serializable(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [convert_to_serializable(i) for i in obj]
-    return obj
-
-
 # --- 启动 ---
 if __name__ == "__main__":
     # 使用你之前定义的 OCRModelFactory
     processor = DocumentOCRSystemV4(output_dir=r"C:\Users\HUAWEI\Desktop\dyysai\output\md")
-    processor.process_document(r"C:\Users\HUAWEI\Desktop\dyysai\test7.pdf")
+    processor.process_document(r"C:\Users\HUAWEI\Desktop\dyysai\test8.pdf")
