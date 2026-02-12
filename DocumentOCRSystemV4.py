@@ -4,14 +4,13 @@ import os
 import time
 
 import fitz
-import cv2
-import numpy as np
 from typing import List, Dict, Any
 
 from paddleocr import PaddleOCR, PPStructureV3
 
 from OCRLightModelFactory import OCRLightModelFactory
 from OCRModelFactory import OCRModelFactory, EngineType
+from pdf_render_utils import PDFRenderUtils
 
 """
 多进程并发版本
@@ -71,7 +70,7 @@ class DocumentOCRSystemV4:
                     print(f"[*] 正在处理第 {page_no}/{total_pages} 页...")
 
                     # 1. 渲染 PDF 页为图片 (300 DPI)
-                    img = self._render_page(doc, page_idx)
+                    img = PDFRenderUtils.render_page_image(doc, page_idx)
 
                     # 2. 版面区域识别 (确定需要哪些模型)
                     layout_engine = OCRModelFactory.get_engine([EngineType.LAYOUT])
@@ -287,12 +286,6 @@ class DocumentOCRSystemV4:
                 box['label'] = self.label_map[label].value
                 types.add(self.label_map[label])
         return types
-
-    def _render_page(self, doc, page_idx):
-        page = doc.load_page(page_idx)
-        pix = page.get_pixmap(matrix=fitz.Matrix(300 / 72, 300 / 72))
-        img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
-        return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
     def _split_regions(self, layout_res):
         """
