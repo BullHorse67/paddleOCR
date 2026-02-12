@@ -1,6 +1,7 @@
 import cv2
 import fitz
 import numpy as np
+from matplotlib import pyplot as plt
 
 
 class PDFRenderUtils:
@@ -20,7 +21,7 @@ class PDFRenderUtils:
 
     @staticmethod
     def visualize_cv2_image(image, save_path: str = None, show: bool = False, window_name: str = "image"):
-        """可视化 cv2 图像：支持保存到文件，或在本地环境弹窗展示。"""
+        """可视化 cv2 图像：支持保存到文件，展示时使用 plt 并自动缩放。"""
         if image is None:
             raise ValueError("image 不能为空")
 
@@ -28,9 +29,19 @@ class PDFRenderUtils:
             cv2.imwrite(save_path, image)
 
         if show:
-            cv2.imshow(window_name, image)
-            cv2.waitKey(0)
-            cv2.destroyAllWindows()
+            h, w = image.shape[:2]
+            max_side = max(h, w)
+            scale = 1.0 if max_side <= 1600 else 1600 / max_side
+            fig_w = max(4, (w * scale) / 100)
+            fig_h = max(4, (h * scale) / 100)
+
+            rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            plt.figure(figsize=(fig_w, fig_h))
+            plt.imshow(rgb_image)
+            plt.title(window_name)
+            plt.axis('off')
+            plt.tight_layout()
+            plt.show()
 
         return image
 
@@ -85,3 +96,15 @@ class PDFRenderUtils:
             raise ValueError("裁剪比例过大，导致图像尺寸无效")
 
         return image[y1:y2, x1:x2]
+
+    @staticmethod
+    def crop_edges_by_ratio(image, ratio: float = 0):
+        """按统一比例同时裁剪上下左右四条边。"""
+        normalized_ratio = PDFRenderUtils._normalize_ratio(ratio)
+        return PDFRenderUtils.crop_edges_by_aspect_ratio(
+            image,
+            top_ratio=normalized_ratio,
+            bottom_ratio=normalized_ratio,
+            left_ratio=normalized_ratio,
+            right_ratio=normalized_ratio,
+        )
