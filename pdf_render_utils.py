@@ -8,7 +8,7 @@ class PDFRenderUtils:
     """PDF 渲染工具类。"""
 
     @staticmethod
-    def render_page_image(doc, page_idx: int, dpi: int = 200):
+    def render_page_image(doc, page_idx: int, dpi: int = 300):
         """将 PDF 指定页渲染为 OpenCV BGR 图像。"""
         page = doc.load_page(page_idx)
         scale = dpi / 72
